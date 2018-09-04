@@ -1,6 +1,7 @@
 import glob
 import os
 import cv2
+import sys
 import numpy as np
 import time
 import argparse
@@ -45,61 +46,66 @@ square_block_width = 2
 
 
 def get_arguments():
-    parser = argparse.ArgumentParser(description="ImageSimilarity Network")
-    parser.add_argument("--data-dir", type=str)
-    parser.add_argument("--image-format", type=str)
-    parser.add_argument("--results-dir", type=str)
-    parser.add_argument("--window-size", type=int)
-    parser.add_argument("--margin", type=int)
-    parser.add_argument("--threshold", type=float)
+    parser = argparse.ArgumentParser(description="Image separator for object detection")
+    parser.add_argument("--data-dir", type=str, required=True)
+    parser.add_argument("--image-format", type=str, required=True)
+    parser.add_argument("--results-dir", type=str, required=True)
+    parser.add_argument("--window-size", type=str, required=True)
+    parser.add_argument("--margin", type=str, required=True)
+    parser.add_argument("--threshold", type=float, required=True)
     return parser.parse_args()
 
 
 if __name__ == '__main__':
-    # from PIL import Image
-    # img = Image.open('./coordinate_183.jpg')
-    # img_resize = img.resize((300, 300))
-    # img_resize.save('data/coordinate_183_300.jpg')
-
     start = time.time()
+    count = 0
     args = get_arguments()
     target = os.path.join(args.data_dir, '*.' + args.image_format)
     results_dir = args.results_dir
-    window_size = args.window_size
-    margin = args.margin
+    if ',' in args.window_size:
+        window_size_list = [int(ws) for ws in args.window_size.split(',')]
+    else:
+        window_size_list = [int(args.window_size)]
+    if ',' in args.margin:
+        margin_list = [int(margin) for margin in args.margin.split(',')]
+    else:
+        margin_list = [int(args.margin)]
+
     threshold = args.threshold
 
     print("Settings:")
     print(' - [target] : ' + target)
     print(' - [results dir] : ' + results_dir)
-    print(' - [window size] : ' + str(window_size))
-    print(' - [margin] : ' + str(margin))
+    print(' - [window size] : ' + str(window_size_list))
+    print(' - [margin] : ' + str(margin_list))
     print(' - [threshold] : ' + str(threshold))
     print('\n')
 
+    if not len(window_size_list) == len(margin_list):
+        print("number of window size and margine is different. make sure you have same number.")
+        sys.exit(1)
+
+    marginMap = {}
+    for ws, margin in zip(window_size_list, margin_list):
+        marginMap[ws] = margin
 
     for path in glob.iglob(target):
+        wsMap = {}
         xmlMap = {}
         dir, filename = os.path.split(path)
-        print('start processing : ' + filename)
-
-        # revise org image
         basefilename = os.path.splitext(filename)[0]
-        img = cv2.imread(path)
-        height, width, channels = img.shape
-        remain_height = height % (window_size - margin)
-        remain_width = width % (window_size - margin)
-        add_height = np.ones((window_size - remain_height, width, 3), np.uint8)
-        add_width = np.ones((height + add_height.shape[0], window_size - remain_width, 3), np.uint8)
-        processed_img = cv2.vconcat([img, add_height])
-        processed_img = cv2.hconcat([processed_img, add_width])
-        sample_img = processed_img.copy()
-        new_height, new_width = processed_img.shape[0],processed_img.shape[1]
-        num_vert = ((new_height - window_size) // (window_size - margin)) + 1
-        num_horizon = ((new_width - window_size) // (window_size - margin)) + 1
+        xml_file = os.path.join(args.data_dir, basefilename + '.xml')
+        if not os.path.isfile(xml_file):
+            print('xml file does not exist. skip processing: ' + filename)
+            continue
+
+        print('start processing : ' + filename)
+        count = count + 1
 
         # transform xml
-        tree = ET.parse(os.path.join(args.data_dir, basefilename + '.xml'))
+        tree = ET.parse(xml_file)
+        image_height = int(tree.findtext('size/height'))
+        image_width = int(tree.findtext('size/width'))
         objects = tree.findall('object')
         print("  - Number of initial BBox: " + str(len(objects)))
         for object in objects:
@@ -108,11 +114,25 @@ if __name__ == '__main__':
             xmax = int(object.findtext('bndbox/xmax'))
             ymin = int(object.findtext('bndbox/ymin'))
             ymax = int(object.findtext('bndbox/ymax'))
-            cv2.rectangle(sample_img, (xmin, ymin), (xmax, ymax), bndbox_line_color, bndbox_line_width)
             bndbox_width = xmax - xmin
             bndbox_height = ymax - ymin
-
             org_area = bndbox_width * bndbox_height
+            long_side = max(bndbox_width, bndbox_height)
+
+            window_size = 0
+            for ws in window_size_list:
+                if long_side <= ws:
+                    window_size = ws
+                    break
+
+            if window_size == 0:
+                window_size = window_size_list[-1]
+
+            margin = marginMap[window_size]
+            new_height = image_height + window_size - image_height % (window_size - margin)
+            new_width = image_width + window_size - image_width % (window_size - margin)
+            num_vert = ((new_height - window_size) // (window_size - margin)) + 1
+            num_horizon = ((new_width - window_size) // (window_size - margin)) + 1
 
             x_base_pos = xmin // (window_size - margin)
             y_base_pos = ymin // (window_size - margin)
@@ -159,6 +179,10 @@ if __name__ == '__main__':
 
                     if transformed_x_max > window_size:
                         transformed_x_max = window_size
+
+                    if transformed_y_max > window_size:
+                        transformed_y_max = window_size
+
                     if transformed_y_min < 0:
                         transformed_y_min = 0
 
@@ -168,15 +192,23 @@ if __name__ == '__main__':
 
                     if transformed_x_min < 0:
                         transformed_x_min = 0
+
                     if transformed_y_min < 0:
                         transformed_y_min = 0
+
+                    if transformed_x_max > window_size:
+                        transformed_x_max = window_size
+
+                    if transformed_y_max > window_size:
+                        transformed_y_max = window_size
 
                 transformed_area = (transformed_y_max - transformed_y_min) * (transformed_x_max - transformed_x_min)
 
                 if transformed_area / float(org_area) < threshold:
                     continue
 
-                xmlFileName = basefilename + '-' + str(y_val_pos) + '-' + str(x_val_pos) + '.xml'
+                # xmlFileName = 'W' + str(window_size) + '-' + basefilename + '-' + str(y_val_pos) + '-' + str(x_val_pos) + '.xml'
+                xmlFileName = basefilename + '-' + str(y_val_pos) + '-' + str(x_val_pos) + '-' + 'W' + str(window_size) + '.xml'
                 if not xmlFileName in xmlMap:
                     baseXML = ET.fromstring(template)
                     baseXML.find('filename').text = xmlFileName
@@ -196,6 +228,12 @@ if __name__ == '__main__':
                 xml.getroot().append(newObj)
                 # xmlFileTree.write(sys.stdout)
 
+            if window_size in wsMap:
+                bb_list = wsMap[window_size]
+                bb_list.append((xmin, ymin, xmax, ymax))
+            else:
+                wsMap[window_size] = [(xmin, ymin, xmax, ymax)]
+
 
         # create xml files
         xml_list = []
@@ -207,24 +245,45 @@ if __name__ == '__main__':
 
 
         # divide org image
-        print("  - Number of images: " + str(num_vert * num_horizon))
-        for i in range(num_vert):
-            for j in range(num_horizon):
-                height_start = i * (window_size - margin)
-                height_end = height_start + window_size
-                width_start = j * (window_size - margin)
-                width_end = width_start + window_size
+        for window_size, bb_list in wsMap.items():
+            img = cv2.imread(path)
+            height, width, channels = img.shape
+            margin = marginMap[window_size]
+            remain_height = height % (window_size - margin)
+            remain_width = width % (window_size - margin)
+            add_height = np.ones((window_size - remain_height, width, 3), np.uint8)
+            add_width = np.ones((height + add_height.shape[0], window_size - remain_width, 3), np.uint8)
+            processed_img = cv2.vconcat([img, add_height])
+            processed_img = cv2.hconcat([processed_img, add_width])
+            sample_img = processed_img.copy()
+            new_height, new_width = processed_img.shape[0], processed_img.shape[1]
+            num_vert = ((new_height - window_size) // (window_size - margin)) + 1
+            num_horizon = ((new_width - window_size) // (window_size - margin)) + 1
+            # print("  - Number of images: " + str(num_vert * num_horizon))
+            for i in range(num_vert):
+                for j in range(num_horizon):
+                    height_start = i * (window_size - margin)
+                    height_end = height_start + window_size
+                    width_start = j * (window_size - margin)
+                    width_end = width_start + window_size
 
-                cv2.rectangle(sample_img, (width_start, height_start), (width_end, height_end), square_block_color, square_block_width)
-                cv2.putText(sample_img, str(i) + '-' + str(j), ((width_end - width_start)/3 + width_start, (height_end - height_start)/2 + height_start), cv2.FONT_HERSHEY_PLAIN, 1, square_block_color, square_block_width, cv2.LINE_AA)
+                    cv2.rectangle(sample_img, (width_start, height_start), (width_end, height_end), square_block_color, square_block_width)
+                    cv2.putText(sample_img, str(i) + '-' + str(j), ((width_end - width_start)/3 + width_start, (height_end - height_start)/2 + height_start), cv2.FONT_HERSHEY_PLAIN, 1, square_block_color, square_block_width, cv2.LINE_AA)
 
-                clopped = processed_img[height_start:height_end, width_start:width_end]
-                newfile = basefilename + '-' + str(i) + '-' + str(j) + '.jpg'
-                cv2.imwrite(os.path.join('results', newfile), clopped)
+                    # newfile = 'W' + str(window_size) + '-' + basefilename + '-' + str(i) + '-' + str(j)
+                    newfile = basefilename + '-' + str(i) + '-' + str(j) + '-' + 'W' + str(window_size)
+                    if newfile + '.xml' in xml_list:
+                        clopped = processed_img[height_start:height_end, width_start:width_end]
+                        cv2.imwrite(os.path.join(results_dir, newfile + '.' + args.image_format), clopped)
 
-        cv2.imwrite(os.path.join('results', 'sample-' + filename), sample_img)
+            for bb in bb_list:
+                cv2.rectangle(sample_img, (bb[0], bb[1]), (bb[2], bb[3]), bndbox_line_color, bndbox_line_width)
+
+            cv2.imwrite(os.path.join(results_dir, 'sample-' + filename + '-' + 'W' + str(window_size)), sample_img)
+
 
     elapsed_time = time.time() - start
 
     print('\n')
+    print("processed images: " + str(count))
     print("elapsed_time:{0}".format(elapsed_time) + "[sec]")
